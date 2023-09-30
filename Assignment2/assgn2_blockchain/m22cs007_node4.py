@@ -1,0 +1,333 @@
+# Importing the libraries
+import datetime
+import hashlib
+import json
+from flask import Flask, request
+import requests
+from uuid import uuid4
+from urllib.parse import urlparse
+import public_private_key as keygen
+import db_help
+from bson import json_util
+
+# Part 1 - Building a Blockchain
+
+class Blockchain:
+    
+    def __init__(self):
+        self.chain = []
+        self.transactions = []
+        self.nodes = set()
+        get_blockchin_copy = db.get_all_data()
+        if get_blockchin_copy == []:
+            self.create_block(proof = 1, previous_hash = '0')
+            
+        else:
+            self.chain = get_blockchin_copy
+    def add_transaction_hashes(self,block):
+        lst = []
+        for i in block['transactions']:
+            lst.append(self.hash(i))
+        return lst
+    
+    def create_block(self, proof, previous_hash):
+        block = {'index': len(self.chain) + 1,
+                 'timestamp': str(datetime.datetime.now()),
+                 'proof': proof,
+                 'markel_root': "",
+                 'previous_hash': previous_hash,
+                 'transactions': self.transactions}
+        self.transactions = []
+        # if number of transactions is odd 
+        if len(block['transactions'])%2 == 1:
+            # adding last transaction so, no. becomes even
+            # block['transactions'][-1]['amount']=0
+            # block['transactions'].append(block['transactions'][-1])
+            block['markel_root'] = get_merkel_root(block['transactions'],block['transactions'][-1])
+        # if no. of transection is even
+        else:
+            block['markel_root'] = get_merkel_root(block['transactions'])
+        block['transactions'].extend(self.add_transaction_hashes(block))
+        self.chain.append(block)
+        block['_id'] = block['index']
+        db.insert_into_db(block)
+        self.update_chain()
+        return block
+
+    def get_previous_block(self):
+        return self.chain[-1]
+
+    def proof_of_work(self, previous_proof):
+        new_proof = 1
+        check_proof = False
+        while check_proof is False:
+            hash_operation = hashlib.sha256(str(new_proof**2 - previous_proof**2).encode()).hexdigest()
+            if hash_operation[:4] == '0000':
+                check_proof = True
+            else:
+                new_proof += 1
+        return new_proof
+    
+    def hash(self, block):
+        encoded_block = json.dumps(block, sort_keys = True).encode()
+        return hashlib.sha256(encoded_block).hexdigest()
+    
+    def is_chain_valid(self, chain):
+        previous_block = chain[0]
+        block_index = 1
+        while block_index < len(chain):
+            block = chain[block_index]
+            if block['previous_hash'] != self.hash(previous_block):
+                return False
+            previous_proof = previous_block['proof']
+            proof = block['proof']
+            hash_operation = hashlib.sha256(str(proof**2 - previous_proof**2).encode()).hexdigest()
+            if hash_operation[:4] != '0000':
+                return False
+            previous_block = block
+            block_index += 1
+        return True
+    
+    def add_transaction(self, sender, receiver, amount):
+        self.transactions.append({'sender': sender,
+                                  'receiver': receiver,
+                                  'amount': amount})
+        previous_block = self.get_previous_block()
+        return previous_block['index'] + 1
+    
+    def add_node(self, address):
+        parsed_url = urlparse(address)
+        self.nodes.add(parsed_url.netloc)
+    # function to update chain
+    def update_chain(self):
+        self.chain = db.get_all_data()
+    
+    def replace_chain(self):
+        network = self.nodes
+        longest_chain = None
+        max_length = len(self.chain)
+        for node in network:
+            response = requests.get(f'http://{node}/get_chain')
+            if response.status_code == 200:
+                length = response.json()['length']
+                chain = response.json()['chain']
+                if length > max_length and self.is_chain_valid(chain):
+                    max_length = length
+                    longest_chain = chain
+        if longest_chain:
+            self.chain = longest_chain
+            return True
+        return False
+
+# Part 2 - Mining our Blockchain
+
+# Creating a Web App
+app = Flask(__name__)
+
+# Creating an address for the node on Port 5000
+node_address = str(uuid4()).replace('-', '')
+# Users public key
+user_public_key = keygen.get_keys()[0]
+user_private_key = keygen.get_keys()[1]
+
+# database object
+db = db_help.DB()
+
+# generating merkel root
+def get_merkel_root(*args):
+    s = ""
+    # print(args)
+    for arg in args:
+        for i in arg:
+            # print(i)
+            s += json_util.dumps(i)
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+
+# Function to get balance
+def spent_amount(address):
+    bal = 0
+    for i in blockchain.chain:
+        for j in i['transactions']:
+            # print(type(j))
+            # print(j['receiver'],"---",req_data['receiver'])
+            if type(j)==type(dict()) and j['sender'] == address:
+                bal += float(j['amount'])
+    return bal
+
+def get_balance(address):
+    bal = 1000
+    for i in blockchain.chain:
+        for j in i['transactions']:
+            # print(type(j))
+            # print(j['receiver'],"---",req_data['receiver'])
+            if type(j)==type(dict()) and j['receiver'] == address:
+                bal += float(j['amount'])
+    print(bal ,spent_amount(address))
+    return bal - spent_amount(address)
+
+# Testing Purpose
+# db.delete_all_data()
+
+# Creating a Blockchain
+blockchain = Blockchain()
+
+
+
+
+# Mining a new block
+@app.route('/mine_block', methods = ['GET'])
+def mine_block():
+    previous_block = blockchain.get_previous_block()
+    previous_proof = previous_block['proof']
+    proof = blockchain.proof_of_work(previous_proof)
+    previous_hash = blockchain.hash(previous_block)
+    blockchain.add_transaction(sender = node_address, receiver = user_public_key, amount = 1)
+    block = blockchain.create_block(proof, previous_hash)
+    response = {'message': 'Congratulations, you just mined a block!',
+                'index': block['index'],
+                'timestamp': block['timestamp'],
+                'proof': block['proof'],
+                'previous_hash': block['previous_hash'],
+                'transactions': block['transactions']}
+    return json.loads(json_util.dumps(response)), 200
+
+# Getting the full Blockchain
+@app.route('/get_chain', methods = ['GET'])
+def get_chain():
+    response = {'chain': blockchain.chain,
+                'length': len(blockchain.chain)}
+    return json.loads(json_util.dumps(response)), 200
+
+# Checking if the Blockchain is valid
+@app.route('/is_valid', methods = ['GET'])
+def is_valid():
+    is_valid = blockchain.is_chain_valid(blockchain.chain)
+    if is_valid:
+        response = {'message': 'All good. The Blockchain is valid.'}
+    else:
+        response = {'message': 'Houston, we have a problem. The Blockchain is not valid.'}
+    return json.loads(json_util.dumps(response)), 200
+
+# Adding a new transaction to the Blockchain
+@app.route('/add_transaction', methods = ['POST'])
+def add_transaction():
+    json = request.get_json()
+    transaction_keys = ['sender', 'receiver', 'amount']
+    if not all(key in json for key in transaction_keys):
+        return 'Some elements of the transaction are missing', 400
+    if get_balance(json['sender']) >= float(json['amount']):
+        index = blockchain.add_transaction(json['sender'], json['receiver'], json['amount'])
+        response = {'message': f'This transaction will be added to Block {index}'}
+    else:
+        response = {'message': f'This transaction can not be done, Insufficient Balance'}
+    return response, 201
+
+# Part 3 - Decentralizing our Blockchain
+
+# Connecting new nodes
+@app.route('/connect_node', methods = ['POST'])
+def connect_node():
+    json = request.get_json()
+    nodes = json.get('nodes')
+    if nodes is None:
+        return "No node", 400
+    for node in nodes:
+        blockchain.add_node(node)
+    response = {'message': 'All the nodes are now connected. The Hadcoin Blockchain now contains the following nodes:',
+                'total_nodes': list(blockchain.nodes)}
+    return json.loads(json_util.dumps(response)), 201
+
+# Replacing the chain by the longest chain if needed
+@app.route('/replace_chain', methods = ['GET'])
+def replace_chain():
+    is_chain_replaced = blockchain.replace_chain()
+    if is_chain_replaced:
+        response = {'message': 'The nodes had different chains so the chain was replaced by the longest one.',
+                    'new_chain': blockchain.chain}
+    else:
+        response = {'message': 'All good. The chain is the largest one.',
+                    'actual_chain': blockchain.chain}
+    return json.loads(json_util.dumps(response)), 200
+
+# getting balence
+@app.route('/get_balance',methods=['POST'])
+def get_wallet_balance():
+    req_data = request.get_json()
+    bal = get_balance(req_data['receiver'])
+    return {
+            'balance': bal,
+            'user': req_data['receiver'],
+            }
+
+user_public_key = keygen.get_keys()[0]
+user_private_key = keygen.get_keys()[1]
+
+# database object
+db = db_help.DB()
+#db.delete_all_data()
+copy = db.get_all_data()
+print("Hash of genesis block")
+print(copy[0]["hash"])
+
+def second_query():
+    print("Addresses and Amounts")
+    for i in copy:
+        print(i["transactions"])
+        
+hash = "78f13659ccf9ba5785203373e889c8777218c8cbf805ee18737f321d9f6978ca"
+def block_info(hash):
+    #third query
+    print("Block info")
+    for i in copy:
+        if i['hash'] == hash:
+            print(i)
+        
+def recent_block():
+    #fourth query
+    print("height of most recent block")
+    print(copy[-1]["index"])
+    #fifth_query
+    print("recent block")
+    print(copy[-1])
+    
+def average_transaction():
+    l = []
+    for i in copy:
+        l.append(len(i["transactions"])/2)
+    print("Average number of transactions")
+    print(sum(l)/len(l))
+    
+def summary():
+    trans = len(copy[5]['transactions'])/2
+    print("Number of transactions")
+    print(trans)
+    coins = 0
+    c = 0
+    for i in copy[5]["transactions"]:
+        while(c < len(copy[5]['transactions'])/2):
+            c+=1
+            coins+=i["amount"]
+    print("total input bitcoins")
+    print(coins)
+        
+second_query()
+block_info(hash)
+recent_block()
+average_transaction()
+summary()
+        
+    
+# generating merkel root
+def get_merkel_root(*args):
+    s = ""
+    # print(args)
+    for arg in args:
+        for i in arg:
+            # print(i)
+            s += json_util.dumps(i)
+    return hashlib.sha256(s.encode()).hexdigest()
+
+# Running the app
+app.run(host = '0.0.0.0', port = 5000)
